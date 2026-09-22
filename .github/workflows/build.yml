@@ -9,104 +9,96 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ------------------------------------------------------------------
-  # The native app: SDL3 + Dear ImGui over libymircore, which is what
-  # Retro-Saturn IS. There was a second job here that built the Flutter shell
-  # this replaced; it is gone. It had been failing for weeks on an iconv the
-  # old core script does not pin an API level for, and worse, it uploaded an
-  # artifact called android-aab -- a signed bundle of the interface we no
-  # longer ship, sitting next to the one we do. Two bundles in one run is a
-  # way to release the wrong one.
-  #
-  # It is here rather than on a developer machine for one reason: the upload
-  # key exists only as a secret on this repository. GitHub secrets cannot be
-  # read back -- not by CI logs, not by the owner -- so a signed bundle can
-  # only be produced where the secret is, and that is here.
-  # ------------------------------------------------------------------
   android-native:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: actions/setup-java@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up the Android SDK
         id: setup-android
         uses: android-actions/setup-android@v3
         with:
           packages: ''
-      - name: Install the NDK the build pins
-        run: sdkmanager --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;35.0.0"
-      - name: Ninja, which the SDL3 and core builds use
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      # SDL3, the core and the frontend, into app/src/main/jniLibs.
-      - name: Build the native libraries
+      - name: Install Android NDK and SDK packages
+        run: |
+          sdkmanager --install \
+            "ndk;28.2.13676358" \
+            "platforms;android-36" \
+            "build-tools;35.0.0"
+
+      - name: Install Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Build native libraries
         run: ./android/build-core.sh
         env:
           ANDROID_NDK: ${{ steps.setup-android.outputs.ndk-path || format('{0}/ndk/28.2.13676358', env.ANDROID_SDK_ROOT) }}
 
-      - name: Check the libraries are actually there
+      - name: Check native libraries
         run: |
           ls -lh android/app/src/main/jniLibs/arm64-v8a/
           test -f android/app/src/main/jniLibs/arm64-v8a/libretrosaturn.so
           test -f android/app/src/main/jniLibs/arm64-v8a/libymircore.so
           test -f android/app/libs/SDL3.jar
 
-      # Signed as the app it replaces. A different key is a different app as
-      # far as the Console is concerned, and a bundle signed with the debug
-      # key installs on a dev device and is refused by Play.
-      - name: Decode the signing keystore
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/signing"
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.jks"
-          test -s "$RUNNER_TEMP/signing/release.jks"
-
-      - name: Build the release bundle
+      - name: Build release APK
         working-directory: android
-        env:
-          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/signing/release.jks
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon :app:bundleRelease
-
-      # The cheap place to catch a wrong key, rather than at upload.
-      - name: Print the signing fingerprint
         run: |
-          keytool -printcert -jarfile \
-            android/app/build/outputs/bundle/release/app-release.aab \
-            | grep -E "SHA256:|Owner:" || true
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
 
-      - uses: actions/upload-artifact@v4
+      - name: Show generated APK
+        run: |
+          echo "Generated APK:"
+          ls -lh android/app/build/outputs/apk/release/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: retro-saturn-aab
-          path: android/app/build/outputs/bundle/release/app-release.aab
+          name: Retro-Saturn-Android
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
 
-  # The core and its host tests on Linux. The Flutter shell this job used to
-  # build as well is gone -- it was the interface the native app replaced,
-  # and CI was still compiling it long after nothing shipped it.
+
   linux:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
-      - run: |
+
+      - name: Install Linux dependencies
+        run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libasound2-dev liblzma-dev pkg-config ninja-build clang cmake
-      - name: Build Linux host tests + .so
+            libasound2-dev \
+            liblzma-dev \
+            pkg-config \
+            ninja-build \
+            clang \
+            cmake
+
+      - name: Build Linux host tests
         run: core/retro/linux/build-ymir-linux.sh
+
       - name: Run native tests
         run: |
-          # Every test the build produced, not a hand-maintained list of four.
-          # Five more were added over time and CI never ran any of them.
           for t in core/retro/linux/build/ymir_*_test; do
-            echo "== $t"; "$t"
+            echo "== $t"
+            "$t"
           done
